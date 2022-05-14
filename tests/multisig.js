@@ -1,5 +1,5 @@
 const anchor = require("@project-serum/anchor");
-const { assert } = require("chai");
+const {assert} = require("chai");
 
 describe("multisig", () => {
   // Configure the client to use the local cluster.
@@ -7,48 +7,54 @@ describe("multisig", () => {
 
   const program = anchor.workspace.Multisig;
 
-  it("Tests the multisig program", async () => {
-    const multisig = anchor.web3.Keypair.generate();
-    const [multisigSigner, nonce] =
+  const multisigAccount = anchor.web3.Keypair.generate();
+  let multisigSigner, nonce;
+  const multisigAccountSize = 200; // Big enough.
+
+  const ownerA = anchor.web3.Keypair.generate();
+  const ownerB = anchor.web3.Keypair.generate();
+  const ownerC = anchor.web3.Keypair.generate();
+  const ownerD = anchor.web3.Keypair.generate();
+  const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey];
+  const threshold = new anchor.BN(2);
+  const transactionAccount = anchor.web3.Keypair.generate();
+  const newOwners = [ownerA.publicKey, ownerB.publicKey, ownerD.publicKey];
+  let multisigAccountInfo;
+
+  it('Initialize', async () => {
+    [multisigSigner, nonce] =
       await anchor.web3.PublicKey.findProgramAddress(
-        [multisig.publicKey.toBuffer()],
+        [multisigAccount.publicKey.toBuffer()],
         program.programId
       );
-    const multisigSize = 200; // Big enough.
-
-    const ownerA = anchor.web3.Keypair.generate();
-    const ownerB = anchor.web3.Keypair.generate();
-    const ownerC = anchor.web3.Keypair.generate();
-    const ownerD = anchor.web3.Keypair.generate();
-    const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey];
-
-    const threshold = new anchor.BN(2);
     await program.rpc.createMultisig(owners, threshold, nonce, {
       accounts: {
-        multisig: multisig.publicKey,
+        multisig: multisigAccount.publicKey,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       },
       instructions: [
         await program.account.multisig.createInstruction(
-          multisig,
-          multisigSize
+          multisigAccount,
+          multisigAccountSize
         ),
       ],
-      signers: [multisig],
+      signers: [multisigAccount],
     });
-
-    let multisigAccount = await program.account.multisig.fetch(
-      multisig.publicKey
+    multisigAccountInfo = await program.account.multisig.fetch(
+      multisigAccount.publicKey
     );
 
-    assert.strictEqual(multisigAccount.nonce, nonce);
-    assert.isTrue(multisigAccount.threshold.eq(new anchor.BN(2)));
-    assert.deepEqual(multisigAccount.owners, owners);
+    assert.strictEqual(multisigAccountInfo.nonce, nonce);
+    assert.isTrue(multisigAccountInfo.threshold.eq(new anchor.BN(2)));
+    assert.deepEqual(multisigAccountInfo.owners, owners);
+  });
 
+  it('Create transaction', async () => {
     const pid = program.programId;
+    // The accounts of set_owners instruction
     const accounts = [
       {
-        pubkey: multisig.publicKey,
+        pubkey: multisigAccount.publicKey,
         isWritable: true,
         isSigner: false,
       },
@@ -58,65 +64,67 @@ describe("multisig", () => {
         isSigner: true,
       },
     ];
-    const newOwners = [ownerA.publicKey, ownerB.publicKey, ownerD.publicKey];
     const data = program.coder.instruction.encode("set_owners", {
       owners: newOwners,
     });
 
-    const transaction = anchor.web3.Keypair.generate();
-    const txSize = 1000; // Big enough, cuz I'm lazy.
+    const txAccountSize = 1000; // Big enough, cuz I'm lazy.
     await program.rpc.createTransaction(pid, accounts, data, {
       accounts: {
-        multisig: multisig.publicKey,
-        transaction: transaction.publicKey,
+        multisig: multisigAccount.publicKey,
+        transaction: transactionAccount.publicKey,
         proposer: ownerA.publicKey,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       },
       instructions: [
         await program.account.transaction.createInstruction(
-          transaction,
-          txSize
+          transactionAccount,
+          txAccountSize
         ),
       ],
-      signers: [transaction, ownerA],
+      signers: [transactionAccount, ownerA],
     });
 
     const txAccount = await program.account.transaction.fetch(
-      transaction.publicKey
+      transactionAccount.publicKey
     );
 
     assert.isTrue(txAccount.programId.equals(pid));
     assert.deepEqual(txAccount.accounts, accounts);
     assert.deepEqual(txAccount.data, data);
-    assert.isTrue(txAccount.multisig.equals(multisig.publicKey));
+    assert.isTrue(txAccount.multisig.equals(multisigAccount.publicKey));
     assert.strictEqual(txAccount.didExecute, false);
+  })
 
+  it('Approve', async () => {
     // Other owner approves transaction.
     await program.rpc.approve({
       accounts: {
-        multisig: multisig.publicKey,
-        transaction: transaction.publicKey,
+        multisig: multisigAccount.publicKey,
+        transaction: transactionAccount.publicKey,
         owner: ownerB.publicKey,
       },
       signers: [ownerB],
     });
+  })
 
+  it("Execute transaction", async () => {
     // Now that we've reached the threshold, send the transaction.
     await program.rpc.executeTransaction({
       accounts: {
-        multisig: multisig.publicKey,
+        multisig: multisigAccount.publicKey,
         multisigSigner,
-        transaction: transaction.publicKey,
+        transaction: transactionAccount.publicKey,
       },
       remainingAccounts: program.instruction.setOwners
         .accounts({
-          multisig: multisig.publicKey,
+          multisig: multisigAccount.publicKey,
           multisigSigner,
         })
         // Change the signer status on the vendor signer since it's signed by the program, not the client.
         .map((meta) =>
           meta.pubkey.equals(multisigSigner)
-            ? { ...meta, isSigner: false }
+            ? {...meta, isSigner: false}
             : meta
         )
         .concat({
@@ -126,10 +134,10 @@ describe("multisig", () => {
         }),
     });
 
-    multisigAccount = await program.account.multisig.fetch(multisig.publicKey);
+    multisigAccountInfo = await program.account.multisig.fetch(multisigAccount.publicKey);
 
-    assert.strictEqual(multisigAccount.nonce, nonce);
-    assert.isTrue(multisigAccount.threshold.eq(new anchor.BN(2)));
-    assert.deepEqual(multisigAccount.owners, newOwners);
+    assert.strictEqual(multisigAccountInfo.nonce, nonce);
+    assert.isTrue(multisigAccountInfo.threshold.eq(new anchor.BN(2)));
+    assert.deepEqual(multisigAccountInfo.owners, newOwners);
   });
 });
